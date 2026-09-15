@@ -1,0 +1,23 @@
+# This working directory may contain plaintext vault exports and attachments.
+# Deny by default: only explicitly reviewed project files belong in Git.
+# Add a narrow exception here when introducing a new source/documentation file.
+*
+!/.gitignore
+!/.gitattributes
+!/.editorconfig
+!/README.md
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/Makefile
+!/Start.command
+!/import_attachments.py
+!/test_import_attachments.py
+!/.github/
+!/.github/workflows/
+!/.github/workflows/tests.yml
+
+# Intentionally excluded by the rule above:
+# work/, .tools/, exports, attachments, reports, migration state, mapping.json,
+# legacy mapping files, .env*, credentials, logs, caches, virtual environments,
+# editor settings, operating-system files, and unknown files of any extension.
+# Do not use `git add -f` for migration data.
