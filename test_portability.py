@@ -113,7 +113,7 @@ class PortabilityTests(unittest.TestCase):
         original = app.filename_problem
         with patch.object(app, 'Bitwarden', return_value=bw), \
                 patch.object(app, 'filename_problem', side_effect=lambda name: original(name, windows=True)):
-            with self.assertRaises(app.ImportProblem):
+            with self.assertRaisesRegex(app.ImportProblem, 'Filename.*Windows'):
                 app.execute(args)
         self.assertEqual(bw.import_calls, 0)
         self.assertEqual(bw.uploads, 0)
@@ -137,12 +137,16 @@ class PortabilityTests(unittest.TestCase):
         script = '''
 $ErrorActionPreference = 'Stop'
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$root = Get-Acl -LiteralPath $env:ONEPUX_PRIVATE_DIR
+$root = [System.IO.Directory]::GetAccessControl($env:ONEPUX_PRIVATE_DIR)
 if (!$root.AreAccessRulesProtected) { throw 'Root ACL is not protected' }
-$paths = @($env:ONEPUX_PRIVATE_DIR, (Join-Path $env:ONEPUX_PRIVATE_DIR 'state.json'),
-    (Join-Path $env:ONEPUX_PRIVATE_DIR 'child/attachment.txt'))
+$paths = @($env:ONEPUX_PRIVATE_DIR, [System.IO.Path]::Combine($env:ONEPUX_PRIVATE_DIR, 'state.json'),
+    [System.IO.Path]::Combine($env:ONEPUX_PRIVATE_DIR, 'child/attachment.txt'))
 foreach ($path in $paths) {
-    $acl = Get-Acl -LiteralPath $path
+    if ([System.IO.Directory]::Exists($path)) {
+        $acl = [System.IO.Directory]::GetAccessControl($path)
+    } else {
+        $acl = [System.IO.File]::GetAccessControl($path)
+    }
     $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))
     if ($rules.Count -eq 0) { throw 'Missing ACL' }
     foreach ($rule in $rules) {

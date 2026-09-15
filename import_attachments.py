@@ -72,13 +72,15 @@ def private_directory(root):
     script = '''
 $ErrorActionPreference = 'Stop'
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl = New-Object System.Security.AccessControl.DirectorySecurity
+$acl = [System.Security.AccessControl.DirectorySecurity]::new()
 $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true, $false)
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     $sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:ONEPUX_PRIVATE_DIR -AclObject $acl
+# Use .NET directly: a parent PowerShell 7 can pass a PSModulePath that
+# prevents Windows PowerShell 5.1 from loading its Set-Acl module.
+[System.IO.Directory]::SetAccessControl($env:ONEPUX_PRIVATE_DIR, $acl)
 '''
     env = os.environ.copy()
     env['ONEPUX_PRIVATE_DIR'] = str(root)
