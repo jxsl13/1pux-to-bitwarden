@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Import 1Password entries and attachments into Bitwarden (Python 3.10+)."""
 import argparse
+import base64
 import copy
 from collections import Counter
-import fcntl
+from contextlib import contextmanager
+import errno
 import hashlib
 import html
 import json
@@ -16,6 +18,12 @@ import tempfile
 import unicodedata
 import zipfile
 
+WINDOWS = os.name == 'nt'
+if WINDOWS:
+    import msvcrt
+else:
+    import fcntl
+
 BASE = Path(__file__).resolve().parent
 MAX_FILE = 500 * 1024 * 1024
 SOURCE_FIELD = '1PUX Source ID'
@@ -25,6 +33,110 @@ SOURCE_FIELDS = {SOURCE_FIELD, '1PUX-Quell-ID'}
 
 class ImportProblem(Exception):
     pass
+
+
+@contextmanager
+def work_lock(path):
+    """Use OS locks that are released automatically when a process exits."""
+    with Path(path).open('a+b') as lock:
+        try:
+            if WINDOWS:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise ImportProblem('An import is already running in this work directory.') from None
+            raise
+        try:
+            yield
+        finally:
+            if WINDOWS:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def private_directory(root):
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not WINDOWS:
+        os.chmod(root, 0o700)
+        return
+    # chmod does not restrict Windows access. Set a protected DACL before
+    # creating any plaintext data; child files inherit these access rules.
+    powershell = shutil.which('powershell.exe')
+    if not powershell:
+        raise ImportProblem('Windows PowerShell is required to protect the work directory.')
+    script = '''
+$ErrorActionPreference = 'Stop'
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = New-Object System.Security.AccessControl.DirectorySecurity
+$acl.SetOwner($sid)
+$acl.SetAccessRuleProtection($true, $false)
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $env:ONEPUX_PRIVATE_DIR -AclObject $acl
+'''
+    env = os.environ.copy()
+    env['ONEPUX_PRIVATE_DIR'] = str(root)
+    try:
+        result = subprocess.run([powershell, '-NoLogo', '-NoProfile', '-NonInteractive',
+                                 '-EncodedCommand', base64.b64encode(script.encode('utf-16le')).decode('ascii')],
+                                env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        raise ImportProblem('Timed out while securing the Windows work directory.') from None
+    if result.returncode:
+        raise ImportProblem('Unable to restrict the Windows work directory to the current user. '
+                            'Choose a local NTFS directory owned by your account using --work-dir.')
+
+
+def cli_command(executable, windows=None):
+    """Launch the native CLI, or resolve an official npm shim without cmd.exe."""
+    windows = WINDOWS if windows is None else windows
+    executable = str(executable)
+    if windows:
+        executable = shutil.which(executable) or executable
+    if not windows or Path(executable).suffix.lower() not in ('.cmd', '.bat', '.ps1'):
+        return [executable]
+    shim = Path(shutil.which(executable) or executable).resolve()
+    package = shim.parent / 'node_modules' / '@bitwarden' / 'cli'
+    try:
+        metadata = json.loads((package / 'package.json').read_text(encoding='utf-8'))
+        entry = metadata['bin']
+        entry = entry['bw'] if isinstance(entry, dict) else entry
+        entry_path = (package / entry).resolve()
+        if metadata.get('name') != '@bitwarden/cli' or not entry_path.is_relative_to(package.resolve()):
+            raise ValueError('Unexpected CLI package')
+        if not entry_path.is_file():
+            raise ValueError('Missing CLI entry point')
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ImportProblem('Cannot resolve this Windows CLI wrapper. Use the official bw.exe, '
+                            'or install @bitwarden/cli with npm and make Node.js available on PATH.') from None
+    sibling_node = shim.parent / 'node.exe'
+    node = str(sibling_node) if sibling_node.is_file() else shutil.which('node.exe') or shutil.which('node')
+    if not node:
+        raise ImportProblem('Node.js was not found. It is required by the npm-installed Bitwarden CLI.')
+    return [node, str(entry_path)]
+
+
+def filename_problem(name, windows=None):
+    windows = WINDOWS if windows is None else windows
+    if (not isinstance(name, str) or not name or name in ('.', '..')
+            or any(c in name for c in ('/', '\\', '\x00')) or any(ord(c) < 32 for c in name)):
+        return 'Unsafe or invalid filename'
+    if windows:
+        stem = name.split('.')[0].rstrip(' ').upper()
+        devices = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$'}
+        devices.update(prefix + digit for prefix in ('COM', 'LPT') for digit in '123456789¹²³')
+        if (any(c in name for c in '<>:"|?*') or name.endswith((' ', '.')) or stem in devices
+                or len(name.encode('utf-16le')) > 510):
+            return ('Filename cannot be represented safely on Windows. Use macOS/Linux for this archive '
+                    'or rename the attachment in 1Password and export again; filenames are not silently changed.')
+    return None
 
 
 def digest(stream):
@@ -40,18 +152,20 @@ def normalized(value):
 
 def save_json(path, data):
     path = Path(path)
-    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
-                                     delete=False) as f:
-        tmp = Path(f.name)
-        try:
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
+                                         delete=False) as f:
+            tmp = Path(f.name)
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write('\n')
             f.flush()
             os.fsync(f.fileno())
-        except BaseException:
+        os.replace(tmp, path)
+    finally:
+        # On Windows the temporary file must be closed before unlink/replace.
+        if tmp is not None:
             tmp.unlink(missing_ok=True)
-            raise
-    os.replace(tmp, path)
 
 
 def file_references(node):
@@ -166,10 +280,8 @@ def read_source(z):
                         suffix = PurePosixPath(member).name[len(ref['id']):]
                         name = ref['name'] or (suffix[3:] if suffix.startswith('___') else suffix[2:])
                         attachment.update(member=member, filename=name, size=z.getinfo(member).file_size)
-                        if (not isinstance(name, str) or not name or name in ('.', '..')
-                                or any(c in name for c in ('/', '\\', '\x00'))
-                                or any(ord(c) < 32 for c in name)):
-                            attachment['error'] = 'Unsafe or invalid filename'
+                        if filename_problem(name):
+                            attachment['error'] = filename_problem(name)
                         elif attachment['size'] > MAX_FILE:
                             attachment['error'] = 'File exceeds 500 MiB; check the server limit'
                         elif ref['size'] is not None and int(ref['size']) != attachment['size']:
@@ -238,7 +350,8 @@ def import_items(bw, z, sources, items, status, args, root):
     for source in sources:
         for attachment in source['attachments']:
             if attachment['error']:
-                raise ImportProblem('Resolve archive file errors before starting a full import.')
+                raise ImportProblem('Resolve archive file errors before starting a full import: '
+                                    + attachment['error'])
     # Check all attachment CRCs before writing any vault entries.
     for member in {a['member'] for s in sources for a in s['attachments']}:
         with z.open(member) as stream:
@@ -261,7 +374,7 @@ def import_items(bw, z, sources, items, status, args, root):
     legacy_path = root / 'basisimport-status.json'
     load_path = state_path if state_path.exists() else legacy_path
     if load_path.exists():
-        state = json.loads(load_path.read_text())
+        state = json.loads(load_path.read_text(encoding='utf-8'))
         if state.get('binding') != binding:
             raise ImportProblem('The import state belongs to a different archive, account, or server. '
                                 'Use a different --work-dir for a separate migration.')
@@ -365,10 +478,11 @@ def choose_target(source, items):
 class Bitwarden:
     def __init__(self, executable, timeout):
         self.executable, self.timeout = executable, timeout
+        self.command = cli_command(executable)
 
     def run(self, *args, as_json=True):
         try:
-            p = subprocess.run([self.executable, *args], stdin=subprocess.DEVNULL,
+            p = subprocess.run([*self.command, *args], stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=self.timeout, check=False)
         except subprocess.TimeoutExpired:
@@ -376,7 +490,7 @@ class Bitwarden:
         if p.returncode:
             # CLI output may contain vault data: do not print or persist it.
             raise ImportProblem(f'bw {args[0]} {args[1] if len(args) > 1 else ""}: '
-                                f'Fehlercode {p.returncode}. Check authentication, permissions, and storage.')
+                                f'exit code {p.returncode}. Check authentication, permissions, and storage.')
         if b'decrypt' in p.stderr.lower() and any(word in p.stderr.lower() for word in (b'fail', b'error', b'unable')):
             raise ImportProblem('The CLI reported decryption errors; the target list may be incomplete. '
                                 'Check CLI authentication and synchronization.')
@@ -438,14 +552,9 @@ def transfer(bw, z, row, temp_root, apply):
 
 def execute(args):
     os.umask(0o077)
-    root = Path(args.work_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(root, 0o700)
-    with (root / '.lock').open('a') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ImportProblem('An import is already running in this work directory.') from None
+    root = Path(args.work_dir).expanduser().resolve()
+    private_directory(root)
+    with work_lock(root / '.lock'):
         return execute_locked(args, root)
 
 
@@ -457,7 +566,7 @@ def execute_locked(args, root):
     status = bw.run('status')
     if status.get('status') != 'unlocked':
         raise ImportProblem('Bitwarden is locked or logged out. See README.md for bw login and BW_SESSION.')
-    mapping = json.loads(Path(args.mapping).read_text()) if args.mapping else {}
+    mapping = json.loads(Path(args.mapping).expanduser().read_text(encoding='utf-8')) if args.mapping else {}
     if not isinstance(mapping, dict) or any(not isinstance(v, str) for v in mapping.values()):
         raise ImportProblem('Mapping must be a JSON object of source ID to Bitwarden ID.')
     # A normal sync may skip downloading based on the account revision timestamp.

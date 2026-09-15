@@ -51,7 +51,7 @@ class FakeBW:
         if args[0] == 'sync':
             return None
         if args[:2] == ('import', '1password1pux'):
-            payload = json.loads(Path(args[2]).read_text())
+            payload = json.loads(Path(args[2]).read_text(encoding='utf-8'))
             self.imported_payloads.append(payload)
             self.import_calls += 1
             # Mimic the real importer's accounts[0] behavior and custom string fields.
@@ -108,7 +108,7 @@ class Tests(unittest.TestCase):
             return app.execute(self.args)
 
     def report(self):
-        return json.loads((self.root / 'work' / ('import-report.json' if self.args.apply else 'preview.json')).read_text())
+        return json.loads((self.root / 'work' / ('import-report.json' if self.args.apply else 'preview.json')).read_text(encoding='utf-8'))
 
     def test_preview_never_uploads(self):
         self.assertEqual(self.run_import(), 0)
@@ -194,6 +194,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], ['/fake/bw', 'get', 'item', 'id; $(touch bad)'])
         self.assertNotIn('shell', run.call_args.kwargs)
 
+    @unittest.skipIf(app.WINDOWS, 'Windows uses ACLs instead of POSIX mode bits')
     def test_private_report_permissions(self):
         self.run_import()
         self.assertEqual((self.root / 'work/preview.json').stat().st_mode & 0o777, 0o600)
@@ -221,8 +222,8 @@ class Tests(unittest.TestCase):
         diagnostic = self.report()['diagnostics']
         self.assertEqual(diagnostic['personal_targets'], 0)
         self.assertTrue(diagnostic['warnings'])
-        self.assertEqual(json.loads((self.root / 'work/mapping-suggested.json').read_text()), {})
-        self.assertIn('No target', (self.root / 'work/preview.html').read_text())
+        self.assertEqual(json.loads((self.root / 'work/mapping-suggested.json').read_text(encoding='utf-8')), {})
+        self.assertIn('No target', (self.root / 'work/preview.html').read_text(encoding='utf-8'))
 
     def test_full_sync_requested(self):
         with patch.object(self.bw, 'run', wraps=self.bw.run) as run:
@@ -232,7 +233,7 @@ class Tests(unittest.TestCase):
     def test_html_escapes_vault_content(self):
         archive(self.source, [source_item(title='<script>alert(1)</script>')])
         self.run_import()
-        rendered = (self.root / 'work/preview.html').read_text()
+        rendered = (self.root / 'work/preview.html').read_text(encoding='utf-8')
         self.assertNotIn('<script>', rendered)
         self.assertIn('&lt;script&gt;', rendered)
 
@@ -377,7 +378,7 @@ class Tests(unittest.TestCase):
     def test_preview_uses_english_status_and_report(self):
         self.full_import(apply=False)
         self.run_import()
-        rendered = (self.root / 'work/preview.html').read_text()
+        rendered = (self.root / 'work/preview.html').read_text(encoding='utf-8')
         self.assertIn('lang="en"', rendered)
         self.assertIn('Created during base import', rendered)
         self.assertIn('Attachments are then matched using their source IDs.', rendered)

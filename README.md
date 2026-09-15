@@ -8,14 +8,24 @@ An independent migration utility. Not affiliated with 1Password or Bitwarden.
 
 - Python 3.10 or newer. No third-party Python packages are required.
 - Bitwarden CLI (`bw`) installed and signed in to the correct server and account.
-- macOS for the double-click launcher. The Python script uses POSIX file locking and can also run on Linux; Windows is not supported.
+- macOS, Linux, or Windows. On Windows, use a local NTFS work directory and Windows PowerShell 5.1 or newer (included with supported Windows versions).
+- On Windows, either the official `bw.exe` or the npm-installed `@bitwarden/cli` with Node.js on PATH. The utility resolves the official npm wrapper and runs Node directly; arbitrary batch wrappers are not supported.
 - A `.1pux` export and permission/storage to attach files to the destination items.
 
 The native import interface was tested with Bitwarden CLI 2026.8.0. Entry conversion is performed by that CLI, so supported fields and item types depend on its version.
 
-## Quick start on macOS
+## Quick start
 
-Double-click **`Start.command`**, unlock the CLI when prompted, and select your export:
+Run the interactive launcher from the repository directory:
+
+| Platform | Command |
+| --- | --- |
+| macOS / Linux | `python3 start.py` |
+| Windows (PowerShell or Command Prompt) | `py -3 start.py` |
+
+If Windows has no `py` launcher, use `python start.py` with Python 3.10 or newer on PATH. On macOS you can also double-click **`Start.command`** to select the export with a file picker.
+
+Enter the export path, choose a mode, and unlock the CLI when prompted:
 
 | Mode | Action |
 | --- | --- |
@@ -23,13 +33,17 @@ Double-click **`Start.command`**, unlock the CLI when prompted, and select your 
 | `i` | Import entries into **My vault**, then upload and verify attachments. |
 | `a` | Add attachments to existing entries only. |
 
-A readable HTML report opens when the run finishes. For an initial full import, My vault must be empty. Items previously imported by this utility are recognized on subsequent runs. Existing organization entries are not changed by full-import mode.
+A readable HTML report opens when the run finishes and a desktop is available. Use `--no-browser` for a terminal-only run. The launcher also accepts an export path, `--mode v`, `--mode i`, or `--mode a`, `--bw PATH`, and `--work-dir PATH`.
+
+For an initial full import, My vault must be empty. Items previously imported by this utility are recognized on subsequent runs. Existing organization entries are not changed by full-import mode.
 
 All source vaults in the selected export are imported into My vault. Source vaults are not automatically mapped to destination organizations.
 
 ## Command-line usage
 
 Run these commands from the repository directory. If you have not signed in to the CLI, select your server with `bw config server SERVER-URL`, then run `bw login`. The CLI session is separate from the desktop and browser extension sessions.
+
+### macOS / Linux
 
 ```sh
 bw status
@@ -46,7 +60,25 @@ bw lock
 unset BW_SESSION
 ```
 
-Never put your master password or session token in a command argument, source file, or report. Use `--bw /path/to/bw` if the CLI is not on your PATH.
+### Windows PowerShell
+
+```powershell
+bw status
+$env:BW_SESSION = (& bw unlock --raw)
+
+# Preview the full migration.
+py -3 import_attachments.py "C:\Users\you\Downloads\export.1pux" --import-items
+
+# Import entries, then upload and verify attachments.
+py -3 import_attachments.py "C:\Users\you\Downloads\export.1pux" --import-items --apply
+
+bw lock
+Remove-Item Env:BW_SESSION
+```
+
+If PowerShell blocks an npm-installed `bw.ps1`, use `bw.cmd` for the shell commands above, or use the Python launcher. The utility itself does not invoke a command shell or change PowerShell's execution policy.
+
+Never put your master password or session token in a command argument, source file, or report. Use `--bw "/path/to/bw"` or `--bw "C:\path\to\bw.exe"` if the CLI is not on your PATH. The remaining examples use `python3`; on Windows substitute `py -3` and your Windows file path.
 
 ## How mapping and verification work
 
@@ -110,7 +142,10 @@ Exit codes: `0` = preview/import completed without unresolved issues; `2` = bloc
 - Same-name attachments with different content are stored separately. Identical content with the same name on the same target is treated as one attachment.
 - Unrecognized archive files are reported for review instead of guessed.
 - Files larger than 500 MiB are blocked locally; the server and CLI may impose a lower limit or reject uploads for storage, plan, or permission reasons.
+- Windows cannot store some attachment filenames, including reserved device names, names with `:`, and names ending in a dot or space. These are blocked before a full import starts, or shown as blocked in attachment-only reports. Use macOS/Linux for that archive, or rename those attachments in 1Password and export again. Filenames are never silently changed.
+- Very long paths can exceed Windows or CLI limits. Use a short local `--work-dir`, such as `C:\Users\you\bw-work`, if needed.
 - Exports and temporary import metadata contain plaintext secrets. Temporary files use private permissions and are removed on normal completion, handled errors, and interruption. A power failure or forced process termination may leave files behind.
+- On macOS/Linux the work directory has mode `0700`; on Windows it receives a protected access-control list granting access only to your current user, inherited by new files. Setup fails before writing vault data if Windows permissions cannot be applied. Choose a dedicated work directory; do not point `--work-dir` at a shared folder or a general-purpose directory.
 - Reports include item titles, file names, identifiers, and hashes. Keep the working directory private and outside cloud-synced folders if you do not want these files synchronized.
 - `.gitignore` allows only explicitly listed project files. Exports, reports, attachments, migration state, mappings, caches, and unexpected files remain local. Do not override this with `git add -f` for migration data.
 
@@ -118,10 +153,10 @@ Exit codes: `0` = preview/import completed without unresolved issues; `2` = bloc
 
 ```sh
 make test
-make check  # Also checks the CLI entry point and zsh launcher syntax.
+make check  # Checks both entry points and the macOS launcher if zsh is available.
 ```
 
-Tests use synthetic exports and a simulated CLI; they do not need credentials or access a real vault. GitHub Actions is configured to run the tests on Linux and macOS. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+On Windows, run `py -3 -m unittest discover -v`; Make is optional. Tests use synthetic exports and a simulated CLI; they do not need credentials or access a real vault. GitHub Actions runs on Linux, macOS, and Windows, including native locking and permission checks, and verifies Windows startup with the official npm CLI. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## References
 

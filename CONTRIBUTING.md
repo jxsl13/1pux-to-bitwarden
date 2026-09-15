@@ -2,7 +2,9 @@
 
 ## Local checks
 
-Use Python 3.10 or newer and run `make test`. On macOS, `make check` also checks the launcher syntax and CLI help. The tests use only Python's standard library, temporary synthetic archives, and a simulated Bitwarden CLI.
+Use Python 3.10 or newer and run `python3 -m unittest discover -v` on macOS/Linux or `py -3 -m unittest discover -v` on Windows. `make test` is also available; `make check` checks both entry points and the macOS launcher syntax when zsh is available. The tests use Python's standard library, temporary synthetic archives, and a simulated Bitwarden CLI. Windows permission checks use the system's Windows PowerShell.
+
+CI covers Linux and Windows with Python 3.10 and 3.14, plus macOS with Python 3.14. A separate Windows smoke check installs the official npm CLI and invokes only `--version` in a temporary profile. Keep subprocess calls free of command shells, read/write JSON as UTF-8, and preserve native locking and private file permissions on all three operating systems.
 
 Keep documentation, comments, diagnostics, and new report fields in English. Preserve compatibility with existing source identifiers and migration state when changing formats.
 

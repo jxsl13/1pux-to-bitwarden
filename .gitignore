@@ -12,6 +12,8 @@
 !/Start.command
 !/import_attachments.py
 !/test_import_attachments.py
+!/test_portability.py
+!/start.py
 !/.github/
 !/.github/workflows/
 !/.github/workflows/tests.yml
