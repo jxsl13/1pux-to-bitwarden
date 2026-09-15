@@ -121,7 +121,15 @@ class PortabilityTests(unittest.TestCase):
     @unittest.skipUnless(app.WINDOWS, 'Requires native Windows ACLs')
     def test_windows_directory_and_children_are_private(self):
         root = self.root / 'private & ü folder'
-        app.private_directory(root)
+        native_run = subprocess.run
+        def checked_run(*args, **kwargs):
+            result = native_run(*args, **kwargs)
+            # Safe to show diagnostics here: this directory contains only
+            # generated fixtures and the child process never invokes bw.
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+            return result
+        with patch.object(app.subprocess, 'run', side_effect=checked_run):
+            app.private_directory(root)
         app.save_json(root / 'state.json', {'synthetic': True})
         child = root / 'child'
         child.mkdir()
